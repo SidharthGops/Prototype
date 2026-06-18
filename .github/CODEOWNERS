@@ -1,0 +1,12 @@
+# This file is what enforces "nobody needs to modify someone else's
+# feature folder" — GitHub requests the right reviewer automatically.
+
+/modules/vton/       @member1
+/modules/catalog/    @member2
+# /modules/saree/     @whoever-owns-it     (add when the module is created)
+# /modules/textile/   @whoever-owns-it
+# /modules/video/     @whoever-owns-it
+
+/shared/              @tech-lead
+/core/                 @tech-lead
+/frontend/               @member-frontend

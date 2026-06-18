@@ -1,0 +1,2 @@
+# This module's own dependencies, on top of requirements-base.txt.
+# Keep heavy/ML deps scoped here so other modules never inherit them.

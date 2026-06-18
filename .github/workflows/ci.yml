@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install base + module requirements
+        run: |
+          pip install -r requirements-base.txt
+          for f in modules/*/requirements.txt; do pip install -r "$f"; done
+      # Each module's contract tests run independently — one module's
+      # failure never blocks another module's PR from being reviewable.
+      - name: Run contract tests per module
+        run: |
+          for d in modules/*/; do
+            if [ -d "${d}tests" ]; then pytest "${d}tests"; fi
+          done

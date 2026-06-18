@@ -1,0 +1,7 @@
+# Versions shared by every module. Module-specific deps (torch, diffusers,
+# etc.) belong in modules/<name>/requirements.txt, not here.
+fastapi
+uvicorn
+pydantic
+pydantic-settings
+pytest

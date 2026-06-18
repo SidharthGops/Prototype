@@ -1,0 +1,12 @@
+# torch, diffusers, etc. — scoped to this module only.
+# modules/vton/requirements.txt
+#
+# Dependencies specific to the VTON module.
+# Install with: pip install -r modules/vton/requirements.txt
+#
+# fastapi and pydantic are declared in requirements-base.txt (repo root).
+# Only list what this module needs beyond the base layer.
+
+gradio_client>=0.16.0   # Gradio client for HF Space communication
+pydantic-settings>=2.0  # VTONConfig env-var loading
+httpx>=0.27.0           # Used internally by gradio_client; pinned for security
