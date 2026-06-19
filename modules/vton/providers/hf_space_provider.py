@@ -1,24 +1,17 @@
 """
 modules/vton/providers/hf_space_provider.py
 
-Concrete provider that calls the IDM-VTON Hugging Face Space via gradio_client.
+Concrete provider that calls the IDM-VTON Hugging Face Space via gradio_client,
+then optionally refines the output with GeminiRefiner.
 
-Design decisions:
-- This is the ONLY file in the entire codebase that knows about Hugging Face or
-  gradio_client. All HF-specific quirks (API names, temp-file paths, cold-start
-  retries) live here and nowhere else.
-- Base64 ↔ temp-file conversion happens here. The Gradio client requires file
-  paths, but the rest of the module speaks base64. We write temp files, call the
-  Space, read the result, then clean up — the caller never sees a file path.
-- Retry logic (up to MAX_RETRIES attempts) handles HF Space cold starts, which
-  can take 30–60 seconds on the free tier. A simple linear backoff is enough here;
-  exponential backoff is overkill for a user-facing, synchronous endpoint.
-- The Client is instantiated once per HFSpaceProvider instance (not per request),
-  so repeated calls reuse the connection. The service layer creates one provider
-  instance at startup, so this is effectively one connection for the lifetime of
-  the process.
-- We catch all exceptions from gradio_client and re-raise as VTONProviderError
-  so the service layer has one error type to handle, regardless of provider.
+Changes from original:
+- Accepts an optional GeminiRefiner at __init__ time (dependency injection,
+  same pattern as VTONService accepting a provider).
+- Calls refiner.refine() on the output before returning, only if a refiner
+  was provided. The refiner handles its own fallback, so this file never
+  needs to catch refinement errors.
+- The prompt is now threaded all the way through run() so the refiner can
+  use it as style context. It was previously used but not passed to refine().
 """
 
 from __future__ import annotations
@@ -28,8 +21,10 @@ import os
 import tempfile
 import time
 import logging
+from typing import Optional
 
 from .base_provider import BaseVTONProvider, VTONProviderError
+from .gemini_refiner import GeminiRefiner
 
 logger = logging.getLogger(__name__)
 
@@ -39,17 +34,30 @@ RETRY_DELAY_SECONDS = 10
 
 class HFSpaceProvider(BaseVTONProvider):
     """
-    Sends images to the IDM-VTON Hugging Face Space and returns the result.
+    Sends images to the IDM-VTON Hugging Face Space and returns the result,
+    optionally refined by Gemini.
 
     Usage
     -----
+    # Without refinement (original behaviour)
     provider = HFSpaceProvider(space_id="yisol/IDM-VTON", timeout=120)
+
+    # With Gemini refinement
+    refiner = GeminiRefiner(api_key="...", strength="medium")
+    provider = HFSpaceProvider(space_id="yisol/IDM-VTON", timeout=120, refiner=refiner)
+
     output_b64 = provider.run(person_b64, garment_b64, prompt)
     """
 
-    def __init__(self, space_id: str, timeout: int = 120) -> None:
+    def __init__(
+        self,
+        space_id: str,
+        timeout: int = 120,
+        refiner: Optional[GeminiRefiner] = None,
+    ) -> None:
         self._space_id = space_id
         self._timeout = timeout
+        self._refiner = refiner          # None = refinement disabled
         self._client = self._build_client()
 
     # ------------------------------------------------------------------
@@ -57,16 +65,8 @@ class HFSpaceProvider(BaseVTONProvider):
     # ------------------------------------------------------------------
 
     def _build_client(self):
-        """
-        Lazily import and instantiate the Gradio Client.
-
-        Lazy import keeps module load fast and avoids a hard crash at import
-        time if gradio_client isn't installed in environments that only run
-        other modules.
-        """
         try:
             from gradio_client import Client, handle_file  # type: ignore
-
             logger.info("Connecting to HF Space: %s", self._space_id)
             self._handle_file = handle_file
             return Client(self._space_id)
@@ -77,10 +77,6 @@ class HFSpaceProvider(BaseVTONProvider):
 
     @staticmethod
     def _b64_to_tempfile(b64_data: str, suffix: str = ".png") -> str:
-        """
-        Decode a base64 string to a named temp file. Returns the file path.
-        Caller is responsible for deleting the file after use.
-        """
         image_bytes = base64.b64decode(b64_data)
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         tmp.write(image_bytes)
@@ -90,7 +86,6 @@ class HFSpaceProvider(BaseVTONProvider):
 
     @staticmethod
     def _file_to_b64(file_path: str) -> str:
-        """Read a file from disk and return its base64 representation."""
         with open(file_path, "rb") as f:
             return base64.b64encode(f.read()).decode("utf-8")
 
@@ -105,22 +100,14 @@ class HFSpaceProvider(BaseVTONProvider):
         prompt: str,
     ) -> str:
         """
-        Call IDM-VTON on the HF Space and return the result as base64.
+        Run IDM-VTON inference, then optionally refine with Gemini.
 
-        The IDM-VTON Gradio app exposes a `/tryon` endpoint that accepts:
-          - ImageEditor dict with background/layers/composite keys
-          - garment image file
-          - text prompt
-          - a few boolean/int flags kept at their defaults
-
-        Refer to the Space's API tab for the current signature:
-        https://huggingface.co/spaces/yisol/IDM-VTON?view=api
+        Returns base64-encoded output image.
         """
         person_tmp = garment_tmp = None
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                # Write images to temp files (Gradio client expects file paths)
                 person_tmp = self._b64_to_tempfile(person_image_b64, suffix=".png")
                 garment_tmp = self._b64_to_tempfile(garment_image_b64, suffix=".png")
 
@@ -137,36 +124,34 @@ class HFSpaceProvider(BaseVTONProvider):
                 person_file = handle_file(person_tmp)
                 garment_file = handle_file(garment_tmp)
 
-                # The IDM-VTON Space API signature (as of the public Space):
-                # fn_index / api_name: "/tryon"
-                # Positional args:
-                #   0: dict {"background": FileData, "layers": [], "composite": None}
-                #      for the ImageEditor component
-                #   1: garment FileData
-                #   2: prompt (str)
-                #   3: auto-mask checkbox (bool)
-                #   4: auto-crop checkbox (bool)
-                #   5: denoise steps (int, default 30)
-                #   6: seed (int, default 42)
                 result = self._client.predict(
                     {"background": person_file, "layers": [], "composite": None},
                     garment_file,
                     prompt,
-                    True,    # is_checked (use auto-generated mask)
-                    True,   # is_checked_crop (UI default: no auto-crop)
+                    True,   # auto-mask
+                    True,   # auto-crop
                     30,     # denoise steps
                     42,     # seed
                     api_name="/tryon",
                 )
 
-                # result is a tuple; first element is the output image path
                 output_path = result[0] if isinstance(result, (list, tuple)) else result
                 output_b64 = self._file_to_b64(output_path)
-                logger.info("HFSpaceProvider: inference succeeded on attempt %d", attempt)
+                logger.info(
+                    "HFSpaceProvider: IDM-VTON inference succeeded on attempt %d",
+                    attempt,
+                )
+
+                # ── Gemini refinement (optional) ──────────────────────
+                if self._refiner is not None:
+                    logger.info("HFSpaceProvider: sending output to GeminiRefiner")
+                    output_b64 = self._refiner.refine(output_b64, prompt)
+                # ──────────────────────────────────────────────────────
+
                 return output_b64
 
             except VTONProviderError:
-                raise  # already wrapped, don't retry init errors
+                raise
 
             except Exception as exc:
                 logger.warning(
@@ -180,22 +165,15 @@ class HFSpaceProvider(BaseVTONProvider):
                     ) from exc
 
             finally:
-                # Always clean up temp files
                 for path in (person_tmp, garment_tmp):
                     if path and os.path.exists(path):
                         os.unlink(path)
                 person_tmp = garment_tmp = None
 
-        # Unreachable, but satisfies type checkers
         raise VTONProviderError("Unexpected exit from retry loop")
 
     def health_check(self) -> bool:
-        """
-        Ping the HF Space by checking if the client can be instantiated.
-        A full inference call would be too slow/costly for a health check.
-        """
         try:
-            # Rebuild client to confirm the Space is reachable
             self._build_client()
             return True
         except VTONProviderError:

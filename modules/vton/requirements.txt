@@ -1,4 +1,3 @@
-# torch, diffusers, etc. — scoped to this module only.
 # modules/vton/requirements.txt
 #
 # Dependencies specific to the VTON module.
@@ -10,3 +9,4 @@
 gradio_client>=0.16.0   # Gradio client for HF Space communication
 pydantic-settings>=2.0  # VTONConfig env-var loading
 httpx>=0.27.0           # Used internally by gradio_client; pinned for security
+google-genai>=0.8.0     # Gemini image generation for post-processing refinement

@@ -2,18 +2,6 @@
 modules/vton/config/config.py
 
 Module-scoped settings for the VTON pipeline.
-
-Design decisions:
-- Uses pydantic-settings so every value can be overridden by an environment
-  variable without changing code. The prefix VTON_ namespaces these cleanly
-  away from core/ env vars.
-- hf_space_id is the only value that ties this module to Hugging Face. If the
-  team switches to RunPod tomorrow, they add a new provider, point active_provider
-  to it, and this file gets one new optional field (runpod_endpoint). Nothing else
-  changes.
-- default_prompt lives here — not hardcoded in the service — so it's tuneable
-  without a code deploy.
-- timeout_seconds is provider-level; the HF Space can be slow on cold starts.
 """
 
 from __future__ import annotations
@@ -36,13 +24,28 @@ class VTONConfig(BaseSettings):
         "A person wearing the garment, photorealistic, natural lighting, full body"
     )
 
+    # ---------------------------------------------------------------
+    # Gemini post-processing settings
+    # ---------------------------------------------------------------
+
+    # Set to your Google AI Studio API key, or leave empty to disable.
+    # Get one at https://aistudio.google.com/app/apikey
+    gemini_api_key: str = ""
+
+    # Master switch. Even if gemini_api_key is set, refinement only runs
+    # when this is True. Lets you enable/disable without touching the key.
+    gemini_refinement_enabled: bool = False
+
+    # Controls how aggressively Gemini corrects the image.
+    # "light"  — fix only obvious artifacts, preserve as much as possible
+    # "medium" — fix artifacts + improve fabric/drape realism (recommended)
+    # "heavy"  — full editorial polish, may alter colors/background
+    gemini_refinement_strength: str = "medium"
+
     class Config:
         env_prefix = "VTON_"
         env_file = ".env"
         extra = "ignore"
 
 
-# Module-level singleton — import this everywhere inside the vton module.
-# Do not instantiate VTONConfig() in multiple places; that makes env-var
-# overrides unpredictable.
 vton_config = VTONConfig()
